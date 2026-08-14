@@ -11,6 +11,7 @@ const {
     REST,
     Routes,
     EmbedBuilder,
+    ChannelType,
 } = require('discord.js');
 const { DisTube } = require('distube');
 const { YtDlpPlugin } = require('@distube/yt-dlp');
@@ -41,6 +42,8 @@ const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
     ],
 });
 
@@ -218,6 +221,93 @@ async function handleTTS(interaction) {
 }
 
 // ════════════════════════════════════════
+// TTS - 채널 자동 읽기
+// ════════════════════════════════════════
+
+const ttsChannels = new Map(); // guildId -> 감시할 텍스트채널 id
+const ttsGuildState = new Map(); // guildId -> { queue: [], playing: boolean }
+
+function getTTSGuildState(guildId) {
+    if (!ttsGuildState.has(guildId)) {
+        ttsGuildState.set(guildId, { queue: [], playing: false });
+    }
+    return ttsGuildState.get(guildId);
+}
+
+async function processTTSQueue(guildId) {
+    const state = getTTSGuildState(guildId);
+    if (state.playing) return;
+
+    const next = state.queue.shift();
+    if (!next) return;
+
+    state.playing = true;
+
+    try {
+        // 음악이 재생중이면 오디오가 겹치므로 이번 메시지는 건너뜀
+        const musicQueue = distube.getQueue(guildId);
+        if (musicQueue && musicQueue.playing) {
+            next.message.react('🔇').catch(() => {});
+            state.playing = false;
+            return processTTSQueue(guildId);
+        }
+
+        let connection = getVoiceConnection(guildId);
+
+        if (!connection) {
+            if (!next.voiceChannel) {
+                // 봇이 아직 음성채널에 없고, 메시지 작성자도 음성채널에 없으면 읽을 수 없음
+                state.playing = false;
+                return processTTSQueue(guildId);
+            }
+            connection = joinVoiceChannel({
+                channelId: next.voiceChannel.id,
+                guildId,
+                adapterCreator: next.guild.voiceAdapterCreator,
+                selfDeaf: true,
+            });
+            await entersState(connection, VoiceConnectionStatus.Ready, 15000);
+        }
+
+        const urls = await googleTTS.getAllAudioUrls(next.text, {
+            lang: 'ko',
+            slow: false,
+            host: 'https://translate.google.com',
+        });
+
+        const player = createAudioPlayer();
+        connection.subscribe(player);
+        await playChunksSequentially(player, urls);
+        player.stop();
+    } catch (err) {
+        console.error('[TTS 채널 자동읽기 오류]', err);
+    }
+
+    state.playing = false;
+    processTTSQueue(guildId);
+}
+
+function enqueueChannelTTS(message) {
+    const state = getTTSGuildState(message.guildId);
+
+    // 너무 많이 쌓이면 오래된 메시지는 버림 (스팸 방지)
+    if (state.queue.length >= 10) return;
+
+    let text = message.content.trim();
+    if (!text) return;
+    if (text.length > 200) text = text.slice(0, 200) + ' (이하 생략)';
+
+    state.queue.push({
+        text,
+        message,
+        guild: message.guild,
+        voiceChannel: message.member?.voice?.channel || null,
+    });
+
+    processTTSQueue(message.guildId);
+}
+
+// ════════════════════════════════════════
 // 슬래시 명령어 정의
 // ════════════════════════════════════════
 
@@ -282,6 +372,21 @@ const commands = [
                 )
         ),
 
+    new SlashCommandBuilder()
+        .setName('tts채널설정')
+        .setDescription('[관리자] 지정한 채널의 메시지를 자동으로 읽어줍니다')
+        .addChannelOption((option) =>
+            option
+                .setName('채널')
+                .setDescription('메시지를 자동으로 읽어줄 텍스트 채널')
+                .addChannelTypes(ChannelType.GuildText)
+                .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('tts채널해제')
+        .setDescription('[관리자] TTS 자동 읽기를 해제합니다'),
+
     new SlashCommandBuilder().setName('도움말').setDescription('봉양이의 도움말을 확인합니다'),
 ].map((command) => command.toJSON());
 
@@ -331,7 +436,11 @@ client.on('interactionCreate', async (interaction) => {
                     },
                     {
                         name: '🗣 TTS',
-                        value: '`/tts 텍스트: 언어:` 입력한 텍스트를 음성으로 읽어줍니다. (음악 재생 중에는 사용 불가)',
+                        value:
+                            '`/tts 텍스트: 언어:` 입력한 텍스트를 그 자리에서 읽어줍니다.\n' +
+                            '`/tts채널설정 채널:` [관리자] 지정한 채널의 메시지를 자동으로 읽어줍니다\n' +
+                            '`/tts채널해제` [관리자] 자동 읽기 해제\n' +
+                            '⚠ 음악 재생 중에는 TTS가 재생되지 않습니다.',
                     }
                 );
 
@@ -340,6 +449,26 @@ client.on('interactionCreate', async (interaction) => {
 
         if (commandName === 'tts') {
             return handleTTS(interaction);
+        }
+
+        if (commandName === 'tts채널설정') {
+            if (!interaction.member.permissions.has('Administrator')) {
+                return interaction.reply({ content: '❌ 관리자만 사용 가능', flags: 64 });
+            }
+            const channel = interaction.options.getChannel('채널');
+            ttsChannels.set(interaction.guildId, channel.id);
+            return interaction.reply(
+                `🗣 이제부터 ${channel} 채널에 올라오는 메시지를 자동으로 읽어줍니다.\n` +
+                `(메시지를 읽으려면 작성자가 음성 채널에 들어가 있어야 하고, 봉양이가 이미 음성 채널에 있다면 그 채널에서 계속 읽습니다)`
+            );
+        }
+
+        if (commandName === 'tts채널해제') {
+            if (!interaction.member.permissions.has('Administrator')) {
+                return interaction.reply({ content: '❌ 관리자만 사용 가능', flags: 64 });
+            }
+            ttsChannels.delete(interaction.guildId);
+            return interaction.reply('🔇 TTS 자동 읽기를 해제했습니다.');
         }
 
         // ── 아래부터는 음성 채널 참여가 필요한 음악 명령어 ──
@@ -453,6 +582,17 @@ client.on('interactionCreate', async (interaction) => {
             console.error(e);
         }
     }
+});
+
+client.on('messageCreate', (message) => {
+    if (message.author.bot) return;
+    if (!message.guild) return;
+
+    const ttsChannelId = ttsChannels.get(message.guildId);
+    if (!ttsChannelId || message.channel.id !== ttsChannelId) return;
+    if (message.content.startsWith('/')) return;
+
+    enqueueChannelTTS(message);
 });
 
 client.on('error', console.error);
