@@ -3,6 +3,10 @@
 // (양봉이와는 완전히 별개의 봇입니다. 토큰/클라이언트ID도 반드시 새로 발급받아 사용하세요)
 // ════════════════════════════════════════
 
+const dns = require('dns');
+dns.setDefaultResultOrder('ipv4first');
+
+
 const express = require('express');
 const {
     Client,
