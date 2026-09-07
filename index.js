@@ -222,7 +222,7 @@ const DEFAULT_VOICE_ID_FALLBACK = '21m00Tcm4TlvDq8ikWAM'; // Rachel (혹시 캐�
 // 유저가 /보이스설정 에서 고를 수 있는 고정 목소리 4종
 const PRESET_VOICES = [
     { id: 'Dyrk0BXUrEfP36mgXeJD', name: '여성 1 - 활발한 목소리' },
-    { id: 'iWLjl1zCuqXRkW6494ve', name: '여성 2 - 나레이터 목소리' },
+    { id: 'Y3UKelKJZyjkuNLnYsLm', name: '여성 2 - 나레이터 목소리' },
     { id: 'ZJ7CnFUgK4JZnvPqF4mL', name: '남성 1 - 차분한 목소리' },
     { id: '1KNqBv4TutQtzSIACsMC', name: '남성 2 - AI영상 나레이터 목소리' },
 ];
